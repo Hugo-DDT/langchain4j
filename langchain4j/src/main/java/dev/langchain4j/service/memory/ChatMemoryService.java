@@ -11,6 +11,7 @@ import dev.langchain4j.memory.chat.ChatMemoryProvider;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -61,7 +62,9 @@ public class ChatMemoryService {
     }
 
     public ChatMemory getChatMemory(Object memoryId) {
-        return chatMemoryProvider != null ? chatMemories.get(memoryId) : memoryId == DEFAULT ? defaultChatMemory : null;
+        return chatMemoryProvider != null
+                ? chatMemories.get(memoryId)
+                : Objects.equals(memoryId, DEFAULT) ? defaultChatMemory : null;
     }
 
     public ChatMemory evictChatMemory(Object memoryId) {
