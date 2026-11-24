@@ -49,14 +49,15 @@ class PojoOutputParser<T> implements OutputParser<T> {
         try {
             if (isPolymorphic(type)) {
                 return extractAndParseJson(text, json -> {
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> map = Json.fromJson(json, Map.class);
-                    if (map != null && map.size() == 1 && map.containsKey("value")) {
-                        return Json.fromJson(Json.toJson(map.get("value")), type);
-                    } else {
-                        return Json.fromJson(json, type);
-                    }
-                }).value();
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> map = Json.fromJson(json, Map.class);
+                            if (map != null && map.size() == 1 && map.containsKey("value")) {
+                                return Json.fromJson(Json.toJson(map.get("value")), type);
+                            } else {
+                                return Json.fromJson(json, type);
+                            }
+                        })
+                        .value();
             } else {
                 return extractAndParseJson(text, type).value();
             }
@@ -92,9 +93,16 @@ class PojoOutputParser<T> implements OutputParser<T> {
 
     @Override
     public String formatInstructions() {
+        return "\nYou must answer strictly in the following JSON format: " + jsonStructure();
+    }
+
+    /**
+     * Element JSON structure, in the same schema language as {@link #formatInstructions()}.
+     */
+    String jsonStructure() {
         String jsonStructure = jsonStructure(type, new HashSet<>());
         validateJsonStructure(jsonStructure, type);
-        return "\nYou must answer strictly in the following JSON format: " + jsonStructure;
+        return jsonStructure;
     }
 
     private static String jsonStructure(Class<?> type, Set<Class<?>> visited) {
