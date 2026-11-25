@@ -49,14 +49,15 @@ class PojoOutputParser<T> implements OutputParser<T> {
         try {
             if (isPolymorphic(type)) {
                 return extractAndParseJson(text, json -> {
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> map = Json.fromJson(json, Map.class);
-                    if (map != null && map.size() == 1 && map.containsKey("value")) {
-                        return Json.fromJson(Json.toJson(map.get("value")), type);
-                    } else {
-                        return Json.fromJson(json, type);
-                    }
-                }).value();
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> map = Json.fromJson(json, Map.class);
+                            if (map != null && map.size() == 1 && map.containsKey("value")) {
+                                return Json.fromJson(Json.toJson(map.get("value")), type);
+                            } else {
+                                return Json.fromJson(json, type);
+                            }
+                        })
+                        .value();
             } else {
                 return extractAndParseJson(text, type).value();
             }
@@ -67,6 +68,12 @@ class PojoOutputParser<T> implements OutputParser<T> {
 
     @Override
     public Optional<JsonSchema> jsonSchema() {
+        if (type == Map.class) {
+            // Map has no bean properties. An empty object schema would reject arbitrary keys,
+            // so JSON-schema-capable models fall back to the textual instructions below.
+            return Optional.empty();
+        }
+
         JsonSchemaElement root;
         if (isPolymorphic(type)) {
             Map<Class<?>, VisitedClassMetadata> visited = new LinkedHashMap<>();
@@ -92,6 +99,11 @@ class PojoOutputParser<T> implements OutputParser<T> {
 
     @Override
     public String formatInstructions() {
+        if (type == Map.class) {
+            // parse() only accepts JSON, so the model must be told to emit a JSON object.
+            return "JSON object";
+        }
+
         String jsonStructure = jsonStructure(type, new HashSet<>());
         validateJsonStructure(jsonStructure, type);
         return "\nYou must answer strictly in the following JSON format: " + jsonStructure;
