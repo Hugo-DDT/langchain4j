@@ -41,7 +41,9 @@ import dev.langchain4j.service.tool.ToolExecutor;
 import dev.langchain4j.service.tool.ToolService;
 import dev.langchain4j.service.tool.ToolService.CompensableToolExecution;
 import dev.langchain4j.service.tool.ToolServiceContext;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -412,7 +414,8 @@ class AiServiceStreamingResponseHandler implements StreamingChatResponseHandler 
                 for (StartedTool startedTool : startedTools) {
                     executedRequests.add(startedTool.request());
                     try {
-                        ToolRequestResult toolRequestResult = startedTool.execution().get();
+                        ToolRequestResult toolRequestResult =
+                                startedTool.execution().get();
                         if (toolRequestResult.error() != null) {
                             toolErrors.put(startedTool.request(), toolRequestResult.error());
                         } else {
@@ -436,6 +439,9 @@ class AiServiceStreamingResponseHandler implements StreamingChatResponseHandler 
                     failRoundBeforeRethrow(executedRequests, toolResults, toolErrors, errorToRethrow);
                     throw errorToRethrow;
                 }
+                // Only callbacks that reached onCompleteToolCall are in executedRequests. Close every declared
+                // call before failing, so the chat memory is not left with an unanswered tool call.
+                throwIfDeclaredToolCallsWereSkipped(aiMessage, executedRequests, toolResults);
             } else {
                 for (ToolExecutionRequest toolRequest : executedRequests) {
                     try {
@@ -540,7 +546,9 @@ class AiServiceStreamingResponseHandler implements StreamingChatResponseHandler 
                     methodKey,
                     compensableExecutions);
 
-            CurrentInvocation.runWith(invocationContext, () -> context.streamingChatModel.chat(next.chatRequest(), HandlerWithoutInvocation.wrap(handler)));
+            CurrentInvocation.runWith(
+                    invocationContext,
+                    () -> context.streamingChatModel.chat(next.chatRequest(), HandlerWithoutInvocation.wrap(handler)));
         } else {
             ChatResponse finalChatResponse = finalResponse(chatResponse, aiMessage);
 
@@ -661,9 +669,10 @@ class AiServiceStreamingResponseHandler implements StreamingChatResponseHandler 
                 .whenComplete((ignored, error) -> {
                     Map<ToolExecutionRequest, ToolExecutionResult> results = new LinkedHashMap<>();
                     for (StartedTool startedTool : drained) {
-                        ToolRequestResult toolRequestResult = startedTool.execution().isCompletedExceptionally()
-                                ? null
-                                : startedTool.execution().getNow(null);
+                        ToolRequestResult toolRequestResult =
+                                startedTool.execution().isCompletedExceptionally()
+                                        ? null
+                                        : startedTool.execution().getNow(null);
                         if (toolRequestResult != null && toolRequestResult.error() == null) {
                             results.put(startedTool.request(), toolRequestResult.result());
                         }
@@ -715,6 +724,67 @@ class AiServiceStreamingResponseHandler implements StreamingChatResponseHandler 
         }
     }
 
+    /**
+     * Fails the round when the final message declares tool calls that never reached
+     * {@link #onCompleteToolCall(CompleteToolCall)}. The calls that did complete keep their real results; each
+     * missing call gets an error result instead of a successful execution, and the invocation fails.
+     */
+    private void throwIfDeclaredToolCallsWereSkipped(
+            AiMessage aiMessage,
+            List<ToolExecutionRequest> executedRequests,
+            Map<ToolExecutionRequest, ToolExecutionResult> toolResults) {
+        List<ToolExecutionRequest> declared = aiMessage.toolExecutionRequests();
+        Map<String, Integer> remainingById = new HashMap<>();
+        for (ToolExecutionRequest executed : executedRequests) {
+            remainingById.merge(executed.id(), 1, Integer::sum);
+        }
+        List<String> missingIds = new ArrayList<>();
+        for (ToolExecutionRequest request : declared) {
+            int left = remainingById.getOrDefault(request.id(), 0);
+            if (left == 0) {
+                missingIds.add(request.id());
+            } else {
+                remainingById.put(request.id(), left - 1);
+            }
+        }
+        if (missingIds.isEmpty()) {
+            return;
+        }
+
+        Map<String, ArrayDeque<ToolExecutionRequest>> executedById = new HashMap<>();
+        for (ToolExecutionRequest executed : executedRequests) {
+            executedById
+                    .computeIfAbsent(executed.id(), ignored -> new ArrayDeque<>())
+                    .add(executed);
+        }
+        ChatMemory memory = getMemory();
+        for (ToolExecutionRequest request : declared) {
+            ArrayDeque<ToolExecutionRequest> matches = executedById.get(request.id());
+            ToolExecutionRequest executed = matches == null || matches.isEmpty() ? null : matches.removeFirst();
+            if (executed == null) {
+                memory.add(ToolExecutionResultMessage.builder()
+                        .id(request.id())
+                        .toolName(request.name())
+                        .text("Tool call was declared by the model but never completed: " + request.id())
+                        .isError(true)
+                        .build());
+            } else {
+                ToolExecutionResult result = toolResults.get(executed);
+                memory.add(ToolExecutionResultMessage.builder()
+                        .id(executed.id())
+                        .toolName(executed.name())
+                        .contents(result.resultContents())
+                        .isError(result.isError())
+                        .attributes(result.attributes())
+                        .build());
+            }
+        }
+        String message = "Model declared " + declared.size() + " tool calls but " + missingIds.size()
+                + " were neither executed nor produced a result: " + missingIds;
+        LOG.error(message);
+        throw new IllegalStateException(message);
+    }
+
     private void failRoundBeforeRethrow(
             List<ToolExecutionRequest> executedRequests,
             Map<ToolExecutionRequest, ToolExecutionResult> toolResults,
@@ -734,11 +804,7 @@ class AiServiceStreamingResponseHandler implements StreamingChatResponseHandler 
 
     private ToolExecutionResult execute(ToolExecutionRequest toolRequest) {
         return context.toolService.executeTool(
-                invocationContext,
-                toolExecutors,
-                toolRequest,
-                beforeToolExecutionHandler,
-                toolExecutionHandler);
+                invocationContext, toolExecutors, toolRequest, beforeToolExecutionHandler, toolExecutionHandler);
     }
 
     private ChatMemory getMemory() {
